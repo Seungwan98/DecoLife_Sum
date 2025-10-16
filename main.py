@@ -13,7 +13,7 @@ import re
 import traceback
 from typing import Optional, Tuple, List
 
-import pandas as pd  # 요구: pandas>=2.2
+import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
