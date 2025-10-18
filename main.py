@@ -1,11 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-엑셀 정산 집계기 (단일 파일 버전)
-- GUI(Tkinter) + 엑셀 집계 로직(pandas) 하나로 통합
-- 기능:
-  1) 파일 선택(.xlsx) → 파일명 표시
-  2) 시트 이름(옵션) 입력
-  3) "집계 실행 → 저장" 버튼으로 결과 엑셀 저장
+엑셀 정산 집계기 (단일 파일 버전 + 판매가 추가)
+- GUI(Tkinter) + 엑셀 집계 로직(pandas)
+- 등록상품명 + 판매가 + 정산대상액 + 옵션명 조합별로 집계
 """
 
 import os
@@ -19,7 +16,7 @@ from tkinter import filedialog, messagebox
 
 # ====== 집계 로직 ======
 
-REQUIRED = ["등록상품명", "정산대상액", "옵션명"]
+REQUIRED = ["등록상품명", "판매가", "정산대상액", "옵션명"]
 
 def _norm(s: str) -> str:
     s = str(s)
@@ -65,24 +62,25 @@ def map_columns_loose(df: pd.DataFrame) -> List[str]:
                 break
         if key not in found:
             raise KeyError(f"'{key}' 컬럼을 찾지 못했습니다. 현재 컬럼: {list(df.columns)}")
-    return [found[k] for k in REQUIRED]  # [등록상품명, 정산대상액, 옵션명]
+    return [found[k] for k in REQUIRED]  # [등록상품명, 판매가, 정산대상액, 옵션명]
 
 def count_combo(excel_path: str, sheet_name: Optional[str] = None) -> pd.DataFrame:
     _, df = detect_header_row(excel_path, sheet_name=sheet_name)
-    name_col, amount_col, option_col = map_columns_loose(df)
+    name_col, price_col, amount_col, option_col = map_columns_loose(df)
 
-    # 정산대상액 숫자 변환
-    df[amount_col] = (
-        df[amount_col]
-        .astype(str)
-        .replace({r"[^0-9.\-]": ""}, regex=True)  # 콤마/원 문자 제거
-        .replace("", "0")
-        .astype(float)
-    )
+    # 금액 컬럼 숫자 변환
+    for col in [price_col, amount_col]:
+        df[col] = (
+            df[col]
+            .astype(str)
+            .replace({r"[^0-9.\-]": ""}, regex=True)
+            .replace("", "0")
+            .astype(float)
+        )
 
     # 조합별 갯수
     result = (
-        df.groupby([name_col, amount_col, option_col])
+        df.groupby([name_col, option_col, price_col, amount_col])
           .size()
           .reset_index(name="갯수")
     )
@@ -93,18 +91,18 @@ def count_combo(excel_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
     # 합계금액 = 정산대상액 * 갯수
     result["합계금액"] = result[amount_col] * result["갯수"]
 
-    # 정렬 (상품별 총갯수 ↓, 등록상품명/옵션명/금액 ↑)
+    # 정렬 (상품별 총갯수 ↓, 등록상품명/옵션명/판매가/정산대상액 ↑)
     result = result.sort_values(
-        ["__total_per_name", name_col, option_col, amount_col],
-        ascending=[False, True, True, True]
+        ["__total_per_name", name_col, option_col, price_col, amount_col],
+        ascending=[False, True, True, True, True]
     ).drop(columns="__total_per_name")
 
-    # 컬럼 순서
-    result = result[[name_col, option_col, amount_col, "갯수", "합계금액"]]
+    # 출력 순서: 등록상품명, 옵션명, 판매가, 정산대상액, 갯수, 합계금액
+    result = result[[name_col, option_col, price_col, amount_col, "갯수", "합계금액"]]
 
     # 총합계 행 추가
     total_sum = result["합계금액"].sum()
-    total_row = pd.DataFrame([[None, None, "총 합계금액", None, total_sum]],
+    total_row = pd.DataFrame([[None, None, None, "총 합계금액", None, total_sum]],
                              columns=result.columns)
     result = pd.concat([result, total_row], ignore_index=True)
 
@@ -112,7 +110,7 @@ def count_combo(excel_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
 
 # ====== GUI(App) ======
 
-APP_TITLE = "엑셀 정산 집계기 (단일 파일)"
+APP_TITLE = "엑셀 정산 집계기 (판매가 포함)"
 DEFAULT_OUT_NAME = "result_output.xlsx"
 
 class App(tk.Tk):
@@ -121,15 +119,11 @@ class App(tk.Tk):
         self.title(APP_TITLE)
         self.geometry("580x260")
         self.resizable(False, False)
-
         self.selected_path: Optional[str] = None
-
         self._build_widgets()
 
     def _build_widgets(self):
         pad = {"padx": 12, "pady": 8}
-
-        # 파일 선택
         frm_file = tk.Frame(self)
         frm_file.pack(fill="x", **pad)
         tk.Label(frm_file, text="엑셀 파일(.xlsx):", anchor="w", width=16).pack(side="left")
@@ -137,7 +131,6 @@ class App(tk.Tk):
         self.lbl_filename.pack(side="left", fill="x", expand=True, padx=(6, 6))
         tk.Button(frm_file, text="파일 선택…", command=self.on_pick_file).pack(side="right")
 
-        # 시트 이름
         frm_sheet = tk.Frame(self)
         frm_sheet.pack(fill="x", **pad)
         tk.Label(frm_sheet, text="시트 이름(옵션):", anchor="w", width=16).pack(side="left")
@@ -145,14 +138,12 @@ class App(tk.Tk):
         self.ent_sheet.pack(side="left", fill="x", expand=True, padx=(6, 6))
         tk.Label(frm_sheet, text="(비우면 첫 번째 시트)", fg="#666").pack(side="left")
 
-        # 버튼들
         frm_actions = tk.Frame(self)
         frm_actions.pack(fill="x", **pad)
         self.btn_run = tk.Button(frm_actions, text="집계 실행 → 저장", command=self.on_run)
         self.btn_run.pack(side="left")
         tk.Button(frm_actions, text="종료", command=self.destroy).pack(side="right")
 
-        # 상태바
         self.status = tk.StringVar(value="준비됨")
         tk.Label(self, textvariable=self.status, anchor="w", fg="#444").pack(fill="x", padx=12, pady=(12, 10))
 
