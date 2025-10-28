@@ -68,8 +68,17 @@ def count_combo(excel_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
     _, df = detect_header_row(excel_path, sheet_name=sheet_name)
     name_col, price_col, amount_col, option_col = map_columns_loose(df)
 
-    # 금액 컬럼 숫자 변환
-    for col in [price_col, amount_col]:
+    # "판매수량" 컬럼 찾기
+    qty_col = None
+    for c in df.columns:
+        if "판매수량" in _norm(c):
+            qty_col = c
+            break
+    if not qty_col:
+        raise KeyError("'판매수량' 컬럼을 찾지 못했습니다.")
+
+    # 숫자 변환
+    for col in [price_col, amount_col, qty_col]:
         df[col] = (
             df[col]
             .astype(str)
@@ -78,10 +87,10 @@ def count_combo(excel_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
             .astype(float)
         )
 
-    # 조합별 갯수
+    # 조합별 합계 (판매수량 합산)
     result = (
-        df.groupby([name_col, option_col, price_col, amount_col])
-          .size()
+        df.groupby([name_col, option_col, price_col, amount_col], dropna=False)[qty_col]
+          .sum()
           .reset_index(name="갯수")
     )
 
@@ -107,6 +116,7 @@ def count_combo(excel_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
     result = pd.concat([result, total_row], ignore_index=True)
 
     return result
+
 
 # ====== GUI(App) ======
 
