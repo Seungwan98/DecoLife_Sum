@@ -1,216 +1,196 @@
 # -*- coding: utf-8 -*-
 """
-엑셀 정산 집계기 (단일 파일 버전 + 판매가 추가)
-- GUI(Tkinter) + 엑셀 집계 로직(pandas)
-- 등록상품명 + 판매가 + 정산대상액 + 옵션명 조합별로 집계
+엑셀 변환기 (헤더 자동 탐지 + 옵션ID 매핑 + 상품명 + ERP 포맷 + 옵션ID 대체)
+- 첫번째 엑셀: 옵션ID, 매출인식일, 판매 수량(B), 정산대상액, 등록상품명
+- 두번째 엑셀: 옵션ID, 코드, 윈윈상품명
+→ 옵션ID로 매칭해서 결과 엑셀에
+   거래일자(매출인식일), 거래처명(쿠팡-제트배송),
+   상품코드(1)(코드 or 옵션ID), 상품명(1)(윈윈상품명 or 등록상품명),
+   수량(1)(판매수량), 단가(1)(정산대상액)
+   나머지 컬럼은 비워두고 매핑 실패 상품명은 빨간색 표시
 """
 
-import os
-import re
-import traceback
-from typing import Optional, Tuple, List
-
+import os, re, traceback
+from typing import Optional, List
 import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from openpyxl.styles import Font
 
-# ====== 집계 로직 ======
 
-REQUIRED = ["등록상품명", "판매가", "정산대상액", "옵션명"]
+# ================= 유틸 =================
 
 def _norm(s: str) -> str:
     s = str(s)
     s = s.replace("\u200b", "").replace("\ufeff", "")
-    s = re.sub(r"\s+", "", s)
-    return s
+    return re.sub(r"\s+", "", s).lower()
 
-def resolve_sheet_name(excel_path: str, sheet_name: Optional[str]) -> str:
-    if sheet_name:
-        return sheet_name
-    xls = pd.ExcelFile(excel_path)
-    if not xls.sheet_names:
-        raise ValueError("엑셀 파일에 시트가 없습니다.")
-    return xls.sheet_names[0]
-
-def detect_header_row(
-    excel_path: str,
-    sheet_name: Optional[str] = None,
-    search_rows: int = 50
-) -> Tuple[int, pd.DataFrame]:
-    sheet = resolve_sheet_name(excel_path, sheet_name)
-    raw = pd.read_excel(excel_path, sheet_name=sheet, header=None, dtype=str)
-    targets = [_norm(t) for t in REQUIRED]
-    header_idx = None
-    for i in range(min(search_rows, len(raw))):
-        row_norm = [_norm(v) for v in raw.iloc[i].tolist()]
-        if all(any(t in c for c in row_norm) for t in targets):
-            header_idx = i
-            break
-    if header_idx is None:
-        header_idx = 0
-    df = pd.read_excel(excel_path, sheet_name=sheet, header=header_idx)
-    return header_idx, df
-
-def map_columns_loose(df: pd.DataFrame) -> List[str]:
-    clean_to_orig = {_norm(c): c for c in df.columns}
-    found = {}
-    for key in REQUIRED:
-        target = _norm(key)
-        for clean, orig in clean_to_orig.items():
-            if target in clean:  # 부분 일치 허용
-                found[key] = orig
-                break
-        if key not in found:
-            raise KeyError(f"'{key}' 컬럼을 찾지 못했습니다. 현재 컬럼: {list(df.columns)}")
-    return [found[k] for k in REQUIRED]  # [등록상품명, 판매가, 정산대상액, 옵션명]
-
-def count_combo(excel_path: str, sheet_name: Optional[str] = None) -> pd.DataFrame:
-    _, df = detect_header_row(excel_path, sheet_name=sheet_name)
-    name_col, price_col, amount_col, option_col = map_columns_loose(df)
-
-    # "판매수량" 컬럼 찾기
-    qty_col = None
+def _find_col(df: pd.DataFrame, *keywords) -> str:
     for c in df.columns:
-        if "판매수량" in _norm(c):
-            qty_col = c
-            break
-    if not qty_col:
-        raise KeyError("'판매수량' 컬럼을 찾지 못했습니다.")
+        nc = _norm(c)
+        for kw in keywords:
+            if _norm(kw) in nc:
+                return c
+    raise KeyError(f"컬럼을 찾지 못했습니다. 필요 키워드: {keywords}, 현재 컬럼: {list(df.columns)}")
 
-    # 숫자 변환
-    for col in [price_col, amount_col, qty_col]:
-        df[col] = (
-            df[col]
-            .astype(str)
-            .replace({r"[^0-9.\-]": ""}, regex=True)
-            .replace("", "0")
-            .astype(float)
-        )
-
-    # 조합별 합계 (판매수량 합산)
-    result = (
-        df.groupby([name_col, option_col, price_col, amount_col], dropna=False)[qty_col]
-          .sum()
-          .reset_index(name="갯수")
+def _to_number(series: pd.Series) -> pd.Series:
+    return (
+        series.astype(str)
+              .replace({r"[^0-9.\-]": ""}, regex=True)
+              .replace("", "0")
+              .astype(float)
     )
 
-    # 등록상품명별 총갯수(정렬용)
-    result["__total_per_name"] = result.groupby(name_col)["갯수"].transform("sum")
+def _read_with_header_detection(path: str, sheet_name: Optional[str], keyword_candidates: List[str], search_rows: int = 50) -> pd.DataFrame:
+    sheet_arg = sheet_name if sheet_name else 0
+    raw = pd.read_excel(path, sheet_name=sheet_arg, header=None, dtype=str)
+    targets = [_norm(k) for k in keyword_candidates]
+    for i in range(min(search_rows, len(raw))):
+        row_norm = [_norm(v) for v in raw.iloc[i].tolist()]
+        if any(t in cell for t in targets for cell in row_norm):
+            return pd.read_excel(path, sheet_name=sheet_arg, header=i)
+    return pd.read_excel(path, sheet_name=sheet_arg, header=0)
 
-    # 합계금액 = 정산대상액 * 갯수
-    result["합계금액"] = result[amount_col] * result["갯수"]
 
-    # 정렬 (상품별 총갯수 ↓, 등록상품명/옵션명/판매가/정산대상액 ↑)
-    result = result.sort_values(
-        ["__total_per_name", name_col, option_col, price_col, amount_col],
-        ascending=[False, True, True, True, True]
-    ).drop(columns="__total_per_name")
+# ================= 핵심 로직 =================
 
-    # 출력 순서: 등록상품명, 옵션명, 판매가, 정산대상액, 갯수, 합계금액
-    result = result[[name_col, option_col, price_col, amount_col, "갯수", "합계금액"]]
+def build_result(main_path: str, map_path: str, sheet_name: Optional[str] = None) -> pd.DataFrame:
+    df_main = _read_with_header_detection(
+        main_path, sheet_name,
+        ["옵션id", "optionid", "매출인식일", "판매수량", "정산대상액", "등록상품명"]
+    )
 
-    # 총합계 행 추가
-    total_sum = result["합계금액"].sum()
-    total_row = pd.DataFrame([[None, None, None, "총 합계금액", None, total_sum]],
-                             columns=result.columns)
-    result = pd.concat([result, total_row], ignore_index=True)
+    col_optid  = _find_col(df_main, "옵션id", "optionid")
+    col_date   = _find_col(df_main, "매출인식일")
+    col_qty    = _find_col(df_main, "판매수량", "수량")
+    col_price  = _find_col(df_main, "정산대상액", "정산 대상액")
+    col_regnm  = _find_col(df_main, "등록상품명")
 
+    df_map = _read_with_header_detection(map_path, None, ["옵션id", "optionid", "코드", "상품코드", "윈윈상품명", "상품명"])
+    col_optid2 = _find_col(df_map, "옵션id", "optionid")
+    col_code   = _find_col(df_map, "코드", "상품코드")
+    col_name   = _find_col(df_map, "윈윈상품명", "윈윈 상품명", "상품명")
+
+    # 옵션ID로 조인
+    df_main["_optkey"] = df_main[col_optid].astype(str).map(_norm)
+    df_map["_optkey"]  = df_map[col_optid2].astype(str).map(_norm)
+
+    df = pd.merge(df_main, df_map[["_optkey", col_code, col_name]], on="_optkey", how="left")
+    df[col_qty]   = _to_number(df[col_qty])
+    df[col_price] = _to_number(df[col_price])
+
+    mapped_name = df[col_name]
+    reg_name    = df[col_regnm]
+    fallback_mask = mapped_name.isna() | (mapped_name.astype(str).str.strip() == "")
+
+    final_name = mapped_name.copy()
+    final_name[fallback_mask] = reg_name[fallback_mask]
+
+    # 상품코드: 매핑 없으면 옵션ID로 대체
+    final_code = df[col_code].copy()
+    final_code[fallback_mask] = df[col_optid].astype(str)[fallback_mask]
+
+    n = len(df)
+    blank = [""] * n
+
+    result = pd.DataFrame({
+        "거래일자": df[col_date],
+        "거래처명": ["쿠팡-제트배송"] * n,
+        "상품코드(1)": final_code,
+        "상품명(1)": final_name,
+        "수량(1)": df[col_qty],
+        "단가(1)": df[col_price],
+        "상품비고(1)": blank,
+        **{f"상품코드({i})": blank for i in range(2,6)},
+        **{f"상품명({i})": blank for i in range(2,6)},
+        **{f"수량({i})": blank for i in range(2,6)},
+        **{f"단가({i})": blank for i in range(2,6)},
+        **{f"상품비고({i})": blank for i in range(2,6)},
+        **{f"전표비고({i})": blank for i in range(1,6)},
+    })
+
+    result["__fallback"] = fallback_mask.values
     return result
 
 
-# ====== GUI(App) ======
+def save_result_with_style(df: pd.DataFrame, out_path: str):
+    if "__fallback" in df.columns:
+        fallback_mask = df["__fallback"].fillna(False).tolist()
+        df = df.drop(columns="__fallback")
+    else:
+        fallback_mask = [False]*len(df)
 
-APP_TITLE = "엑셀 정산 집계기 (판매가 포함)"
+    with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+        ws = writer.book.active
+        # 상품명(1) 열 찾기
+        name_col_idx = next((i for i, c in enumerate(ws[1], start=1) if c.value == "상품명(1)"), None)
+        if name_col_idx:
+            for row_idx, fb in enumerate(fallback_mask, start=2):
+                if fb:
+                    ws.cell(row=row_idx, column=name_col_idx).font = Font(color="FFFF0000")
+
+
+# ================= GUI =================
+
+APP_TITLE = "엑셀 변환기 (옵션ID 매핑 + ERP포맷 + 대체옵션ID)"
 DEFAULT_OUT_NAME = "result_output.xlsx"
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("580x260")
+        self.geometry("700x340")
         self.resizable(False, False)
-        self.selected_path: Optional[str] = None
-        self._build_widgets()
+        self.main_path = None
+        self.map_path = None
+        self._build()
 
-    def _build_widgets(self):
-        pad = {"padx": 12, "pady": 8}
-        frm_file = tk.Frame(self)
-        frm_file.pack(fill="x", **pad)
-        tk.Label(frm_file, text="엑셀 파일(.xlsx):", anchor="w", width=16).pack(side="left")
-        self.lbl_filename = tk.Label(frm_file, text="(선택 안 됨)", anchor="w")
-        self.lbl_filename.pack(side="left", fill="x", expand=True, padx=(6, 6))
-        tk.Button(frm_file, text="파일 선택…", command=self.on_pick_file).pack(side="right")
+    def _build(self):
+        pad = {"padx":12,"pady":8}
+        f1=tk.Frame(self);f1.pack(fill="x",**pad)
+        tk.Label(f1,text="1) 주문/정산 엑셀:",width=20,anchor="w").pack(side="left")
+        self.lbl1=tk.Label(f1,text="(선택 안 됨)",anchor="w");self.lbl1.pack(side="left",fill="x",expand=True,padx=(6,6))
+        tk.Button(f1,text="파일 선택…",command=self.pick_main).pack(side="right")
+        f2=tk.Frame(self);f2.pack(fill="x",**pad)
+        tk.Label(f2,text="2) 옵션ID↔코드/상품명 엑셀:",width=20,anchor="w").pack(side="left")
+        self.lbl2=tk.Label(f2,text="(선택 안 됨)",anchor="w");self.lbl2.pack(side="left",fill="x",expand=True,padx=(6,6))
+        tk.Button(f2,text="파일 선택…",command=self.pick_map).pack(side="right")
+        f3=tk.Frame(self);f3.pack(fill="x",**pad)
+        tk.Label(f3,text="1) 시트 이름(옵션):",width=20,anchor="w").pack(side="left")
+        self.ent=tk.Entry(f3);self.ent.pack(side="left",fill="x",expand=True,padx=(6,6))
+        tk.Label(f3,text="(비우면 첫 번째 시트)",fg="#666").pack(side="left")
+        f4=tk.Frame(self);f4.pack(fill="x",**pad)
+        self.btn=tk.Button(f4,text="변환 실행 → 저장",command=self.run);self.btn.pack(side="left")
+        tk.Button(f4,text="종료",command=self.destroy).pack(side="right")
+        self.status=tk.StringVar(value="준비됨")
+        tk.Label(self,textvariable=self.status,anchor="w",fg="#444").pack(fill="x",padx=12,pady=(12,10))
 
-        frm_sheet = tk.Frame(self)
-        frm_sheet.pack(fill="x", **pad)
-        tk.Label(frm_sheet, text="시트 이름(옵션):", anchor="w", width=16).pack(side="left")
-        self.ent_sheet = tk.Entry(frm_sheet)
-        self.ent_sheet.pack(side="left", fill="x", expand=True, padx=(6, 6))
-        tk.Label(frm_sheet, text="(비우면 첫 번째 시트)", fg="#666").pack(side="left")
+    def pick_main(self):
+        path=filedialog.askopenfilename(title="1) 주문/정산 엑셀 선택",filetypes=[("Excel files","*.xlsx")])
+        if path:self.main_path=path;self.lbl1.config(text=os.path.basename(path));self.status.set("1) 주문/정산 엑셀 선택 완료")
 
-        frm_actions = tk.Frame(self)
-        frm_actions.pack(fill="x", **pad)
-        self.btn_run = tk.Button(frm_actions, text="집계 실행 → 저장", command=self.on_run)
-        self.btn_run.pack(side="left")
-        tk.Button(frm_actions, text="종료", command=self.destroy).pack(side="right")
+    def pick_map(self):
+        path=filedialog.askopenfilename(title="2) 옵션ID↔코드/상품명 엑셀 선택",filetypes=[("Excel files","*.xlsx")])
+        if path:self.map_path=path;self.lbl2.config(text=os.path.basename(path));self.status.set("2) 매핑 엑셀 선택 완료")
 
-        self.status = tk.StringVar(value="준비됨")
-        tk.Label(self, textvariable=self.status, anchor="w", fg="#444").pack(fill="x", padx=12, pady=(12, 10))
-
-    def on_pick_file(self):
-        path = filedialog.askopenfilename(
-            title="엑셀 파일 선택",
-            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
-        )
-        if path:
-            self.selected_path = path
-            self.lbl_filename.config(text=os.path.basename(path))
-            self.status.set("파일 선택 완료")
-
-    def on_run(self):
-        if not self.selected_path:
-            messagebox.showwarning(APP_TITLE, "먼저 엑셀 파일을 선택하세요.")
-            return
-
-        initial_dir = os.path.dirname(self.selected_path) if self.selected_path else os.getcwd()
-        out_path = filedialog.asksaveasfilename(
-            title="결과 저장 위치 선택",
-            initialdir=initial_dir,
-            initialfile=DEFAULT_OUT_NAME,
-            defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx")]
-        )
-        if not out_path:
-            self.status.set("저장 취소됨")
-            return
-
-        sheet_name = self.ent_sheet.get().strip() or None
-
+    def run(self):
+        if not self.main_path:return messagebox.showwarning(APP_TITLE,"먼저 1) 주문/정산 엑셀 선택")
+        if not self.map_path:return messagebox.showwarning(APP_TITLE,"먼저 2) 매핑 엑셀 선택")
+        out=filedialog.asksaveasfilename(title="결과 저장 위치",initialfile=DEFAULT_OUT_NAME,defaultextension=".xlsx",filetypes=[("Excel","*.xlsx")])
+        if not out:return
         try:
-            self._toggle_ui(False)
-            self.status.set("집계 중...")
-
-            df_result = count_combo(self.selected_path, sheet_name=sheet_name)
-            df_result.to_excel(out_path, index=False)
-
-            self.status.set(f"완료: {os.path.basename(out_path)} 저장됨")
-            messagebox.showinfo(APP_TITLE, f"저장 완료:\n{out_path}")
-
+            self._toggle(False);self.status.set("변환 중…")
+            df=build_result(self.main_path,self.map_path,self.ent.get().strip() or None)
+            save_result_with_style(df,out)
+            self.status.set("완료: "+os.path.basename(out))
+            messagebox.showinfo(APP_TITLE,f"저장 완료:\n{out}")
         except Exception as e:
-            traceback.print_exc()
-            self.status.set("실패")
-            messagebox.showerror(APP_TITLE, f"에러 발생:\n{e}")
+            traceback.print_exc();self.status.set("실패");messagebox.showerror(APP_TITLE,f"에러 발생:\n{e}")
+        finally:self._toggle(True)
 
-        finally:
-            self._toggle_ui(True)
+    def _toggle(self,en):self.btn.config(state=tk.NORMAL if en else tk.DISABLED)
 
-    def _toggle_ui(self, enable: bool):
-        state = tk.NORMAL if enable else tk.DISABLED
-        self.btn_run.config(state=state)
-
-def main():
-    app = App()
-    app.mainloop()
 
 if __name__ == "__main__":
-    main()
+    App().mainloop()
