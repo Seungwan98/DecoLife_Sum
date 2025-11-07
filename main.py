@@ -69,7 +69,7 @@ def build_result(main_path: str, map_path: str, sheet_name: Optional[str] = None
     df_map = _read_with_header_detection(map_path, None, ["옵션id", "optionid", "코드", "상품코드", "윈윈상품명", "상품명"])
     col_optid2 = _find_col(df_map, "옵션id", "optionid")
     col_code   = _find_col(df_map, "코드", "상품코드")
-    col_name   = _find_col(df_map, "윈윈상품명", "윈윈 상품명", "상품명")
+    col_name   = _find_col(df_map, "윈윈상품명", "윈윈 상품명")
 
     # 옵션ID로 조인
     df_main["_optkey"] = df_main[col_optid].astype(str).map(_norm)
