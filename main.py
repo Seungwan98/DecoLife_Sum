@@ -18,10 +18,19 @@ import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from openpyxl.styles import Font
+import sys
+from pathlib import Path
 from dotenv import load_dotenv
-import os
 
-load_dotenv()
+def resource_path(relative: str) -> Path:
+    if hasattr(sys, "_MEIPASS"):  # PyInstaller 실행환경
+        base = Path(sys._MEIPASS)
+    else:
+        base = Path(__file__).resolve().parent
+    return base / relative
+
+env_path = resource_path(".env")
+load_dotenv(dotenv_path=env_path)
 MAP_SHEET_URL = os.getenv("MAP_SHEET_URL")
 
 # ====== 공통 유틸 ======
