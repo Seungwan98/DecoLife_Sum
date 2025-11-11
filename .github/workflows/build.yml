@@ -35,7 +35,14 @@ jobs:
           else
             pip install pandas>=2.2 openpyxl>=3.1
           fi
-          pip install pyinstaller
+          # ✅ exe 빌드용 추가 패키지
+          pip install pyinstaller python-dotenv
+
+      # ✅ GitHub Secrets 에서 MAP_SHEET_URL을 .env 로 만들기
+      - name: Create .env from secrets
+        shell: bash
+        run: |
+          echo "MAP_SHEET_URL=${{ secrets.MAP_SHEET_URL }}" > .env
 
       - name: Build EXE with PyInstaller
         shell: bash
