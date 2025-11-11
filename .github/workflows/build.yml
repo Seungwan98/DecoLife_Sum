@@ -42,7 +42,7 @@ jobs:
       - name: Create .env from secrets
         shell: bash
         run: |
-          echo "MAP_SHEET_URL=${{ secrets.MAP_SHEET_URL }}" > .env
+          echo "MAP_SHEET_URL=${{ secrets.MAP_SHEET_URL }}" >> .env
 
       - name: Build EXE with PyInstaller
         shell: bash
