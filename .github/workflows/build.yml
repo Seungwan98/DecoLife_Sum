@@ -25,7 +25,6 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
-      # requirements.txt가 있으면 그것부터 설치, 없으면 필요한 최소 패키지 설치
       - name: Install dependencies
         shell: bash
         run: |
@@ -35,14 +34,15 @@ jobs:
           else
             pip install pandas>=2.2 openpyxl>=3.1
           fi
-          # ✅ exe 빌드용 추가 패키지
           pip install pyinstaller python-dotenv
 
-      # ✅ GitHub Secrets 에서 MAP_SHEET_URL을 .env 로 만들기
       - name: Create .env from secrets
         shell: bash
         run: |
           echo "MAP_SHEET_URL=${{ secrets.MAP_SHEET_URL }}" >> .env
+          echo "=== .env created ==="
+          ls -la
+          cat .env
 
       - name: Build EXE with PyInstaller
         shell: bash
@@ -60,15 +60,14 @@ jobs:
         shell: bash
         run: |
           cp .env dist/.env
+          ls -la dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-exe
-          path: dist/*
+          path: dist
 
-
-      # 실패 시 빌드 산출물/로그 업로드(문제 디버깅용)
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -77,5 +76,3 @@ jobs:
           path: |
             build
             *.spec
-            
-            
