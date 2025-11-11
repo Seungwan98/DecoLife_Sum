@@ -47,7 +47,6 @@ jobs:
       - name: Build EXE with PyInstaller
         shell: bash
         run: |
-          # 엔트리 파일명을 바꾸려면 main.py 부분만 변경
           pyinstaller \
             --clean -y \
             --onefile --windowed \
@@ -57,11 +56,17 @@ jobs:
             --collect-all et_xmlfile \
             main.py
 
+      - name: Copy .env next to exe
+        shell: bash
+        run: |
+          cp .env dist/.env
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-exe
-          path: dist/*.exe
+          path: dist/*
+
 
       # 실패 시 빌드 산출물/로그 업로드(문제 디버깅용)
       - name: Upload logs on failure
@@ -72,3 +77,5 @@ jobs:
           path: |
             build
             *.spec
+            
+            
