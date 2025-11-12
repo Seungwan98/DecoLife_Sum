@@ -2,7 +2,7 @@
 """
 엑셀 변환기 (헤더 자동 탐지 + 옵션ID 매핑 + 단가 계산 + 묶기 + 구글시트 매핑)
 - 첫번째 엑셀: 옵션ID, 매출인식일, 판매 수량(B), 정산대상액, 등록상품명
-- 두번째 매핑 데이터: 고정된 구글 스프레드시트(옵션ID, 코드, 윈윈상품명)
+- 두번째 매핑 데이터: 고정된 구글시트(옵션ID, 코드, 윈윈상품명)
 
 주의:
 - 아래 MAP_SHEET_URL에 해당 구글 시트를
@@ -18,29 +18,35 @@ import pandas as pd
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from openpyxl.styles import Font
-import sys
-from pathlib import Path
 from dotenv import load_dotenv
 
-def resource_path(relative: str) -> Path:
-    if hasattr(sys, "_MEIPASS"):  # PyInstaller 실행환경
-        base = Path(sys._MEIPASS)
-    else:
-        base = Path(__file__).resolve().parent
-    return base / relative
-
-env_path = resource_path(".env")
-load_dotenv(dotenv_path=env_path)
-MAP_SHEET_URL = os.getenv("MAP_SHEET_URL")
+# ====== 환경 변수/기본값 ======
+load_dotenv()
+MAP_SHEET_URL = os.getenv(
+    "MAP_SHEET_URL",
+    "https://docs.google.com/spreadsheets/d/1kf3S17hnJmJVheWL6YR9TZNniZYqQtxMG5o3QKPYRM4/export?format=xlsx"
+)
 
 # ====== 공통 유틸 ======
 
 def _norm(s: str) -> str:
+    """헤더 탐지/키 매핑용: 공백 제거, 소문자"""
     s = str(s)
     s = s.replace("\u200b", "").replace("\ufeff", "")
     s = re.sub(r"\s+", "", s)
     return s.lower()
 
+def _name_group_key(s: str) -> str:
+    """(보여줄 이름 정규화가 필요할 때 사용 가능 — 현재 그룹핑엔 사용 안 함)"""
+    s = str(s)
+    s = s.replace("\u200b", "").replace("\ufeff", "")
+    s = s.replace("（", "(").replace("）", ")").replace("［", "[").replace("］", "]")
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
+
+def _name_sort_key(series: pd.Series) -> pd.Series:
+    """정렬용: 문자열 소문자 기준 정렬"""
+    return series.astype(str).str.lower()
 
 def _find_col(df: pd.DataFrame, *keywords) -> str:
     for c in df.columns:
@@ -50,7 +56,6 @@ def _find_col(df: pd.DataFrame, *keywords) -> str:
                 return c
     raise KeyError(f"컬럼을 찾지 못했습니다. 필요 키워드: {keywords}, 현재 컬럼: {list(df.columns)}")
 
-
 def _to_number(series: pd.Series) -> pd.Series:
     return (
         series.astype(str)
@@ -58,7 +63,6 @@ def _to_number(series: pd.Series) -> pd.Series:
               .replace("", "0")
               .astype(float)
     )
-
 
 def _read_with_header_detection(path: str,
                                 sheet_name: Optional[str],
@@ -108,12 +112,11 @@ def build_result(main_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
 
     col_optid2 = _find_col(df_map, "옵션id", "optionid")
     col_code   = _find_col(df_map, "코드", "상품코드")
-    col_name   = _find_col(df_map, "윈윈상품명", "윈윈 상품명", "상품명")
+    col_name   = _find_col(df_map, "윈윈상품명", "윈윈 상품명")  # 윈윈 상품명
 
     # 4) 옵션ID로 조인
     df_main["_optkey"] = df_main[col_optid].astype(str).map(_norm)
     df_map["_optkey"]  = df_map[col_optid2].astype(str).map(_norm)
-
     df = pd.merge(df_main, df_map[["_optkey", col_code, col_name]], on="_optkey", how="left")
 
     # 5) 숫자 변환
@@ -121,8 +124,8 @@ def build_result(main_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
     amount_raw = _to_number(df[col_price])  # 정산대상액 (음수 가능)
 
     # 6) 상품명 / 코드 확정
-    mapped_name = df[col_name]
-    reg_name    = df[col_regnm]
+    mapped_name = df[col_name]          # 윈윈 상품명
+    reg_name    = df[col_regnm]         # 등록상품명
     # 매핑 안 된 행(True) → 등록상품명 사용 + 상품명 빨간색 표시 대상
     fallback_mask = mapped_name.isna() | (mapped_name.astype(str).str.strip() == "")
 
@@ -137,14 +140,13 @@ def build_result(main_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
     #   - 수량 > 1 이면 금액 / 수량
     #   - 최종 단가는 반올림 후 int
     amount_abs = amount_raw.abs()
-
     unit_price = amount_abs.copy()
     multi_mask = qty > 1
     unit_price[multi_mask] = amount_abs[multi_mask] / qty[multi_mask]
-
     unit_price = unit_price.round().astype(int)
 
-    # 8) 중간 테이블 만들기
+    # 8) 중간 테이블 (부호 분리 포함)
+    neg_flag = qty < 0
     mid = pd.DataFrame({
         "거래일자": df[col_date],
         "거래처명": "쿠팡-제트배송",
@@ -153,19 +155,22 @@ def build_result(main_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
         "수량(1)":     qty,
         "단가(1)":     unit_price,
         "상품비고(1)": "",
-        "__fallback":  fallback_mask.values,   # 상품명이 등록상품명으로 대체된 경우
+        "__fallback":  fallback_mask.values,          # 상품명이 등록상품명으로 대체된 경우
+        "__neg":       neg_flag.values,               # 수량 부호 분리 (True=음수, False=양/0)
     })
 
-    # 9) 같은 (거래일자, 거래처명, 상품코드(1), 상품명(1), 단가(1)) 끼리 수량 합치기
+    # 9) 묶기 기준 = 변환된 상품코드 + 단가 + 수량 부호(양/음)  ← 요청사항
     grouped = (
-        mid
-        .groupby(["거래일자", "거래처명", "상품코드(1)", "상품명(1)", "단가(1)"], dropna=False)
-        .agg(
-            수량_합=("수량(1)", "sum"),
-            상품비고_첫=("상품비고(1)", "first"),
-            fb_any=("__fallback", "max"),
-        )
-        .reset_index()
+        mid.groupby(["상품코드(1)", "단가(1)", "__neg"], dropna=False)
+           .agg(
+               수량_합=("수량(1)", "sum"),
+               상품명_첫=("상품명(1)", "first"),
+               거래일자_첫=("거래일자", "first"),
+               거래처명_첫=("거래처명", "first"),
+               상품비고_첫=("상품비고(1)", "first"),
+               fb_any=("__fallback", "max"),
+           )
+           .reset_index()
     )
 
     n = len(grouped)
@@ -176,55 +181,51 @@ def build_result(main_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
 
     # 10) 최종 ERP 포맷 테이블
     result = pd.DataFrame({
-        "거래일자":    grouped["거래일자"],
-        "거래처명":    grouped["거래처명"],
-        # 상품코드 .0 제거
+        "거래일자":    grouped["거래일자_첫"],
+        "거래처명":    grouped["거래처명_첫"],
         "상품코드(1)": grouped["상품코드(1)"].astype(str).str.replace(r"\.0$", "", regex=True),
-        "상품명(1)":   grouped["상품명(1)"],
+        "상품명(1)":   grouped["상품명_첫"],
         "수량(1)":     qty_sum_int,
         "단가(1)":     price_int,
         "상품비고(1)": grouped["상품비고_첫"],
 
-        "상품코드(2)": blank,
-        "상품명(2)":   blank,
-        "수량(2)":     blank,
-        "단가(2)":     blank,
-        "상품비고(2)": blank,
+        "상품코드(2)": blank, "상품명(2)": blank, "수량(2)": blank, "단가(2)": blank, "상품비고(2)": blank,
+        "상품코드(3)": blank, "상품명(3)": blank, "수량(3)": blank, "단가(3)": blank, "상품비고(3)": blank,
+        "상품코드(4)": blank, "상품명(4)": blank, "수량(4)": blank, "단가(4)": blank, "상품비고(4)": blank,
+        "상품코드(5)": blank, "상품명(5)": blank, "수량(5)": blank, "단가(5)": blank, "상품비고(5)": blank,
 
-        "상품코드(3)": blank,
-        "상품명(3)":   blank,
-        "수량(3)":     blank,
-        "단가(3)":     blank,
-        "상품비고(3)": blank,
-
-        "상품코드(4)": blank,
-        "상품명(4)":   blank,
-        "수량(4)":     blank,
-        "단가(4)":     blank,
-        "상품비고(4)": blank,
-
-        "상품코드(5)": blank,
-        "상품명(5)":   blank,
-        "수량(5)":     blank,
-        "단가(5)":     blank,
-        "상품비고(5)": blank,
-
-        "전표비고(1)": blank,
-        "전표비고(2)": blank,
-        "전표비고(3)": blank,
-        "전표비고(4)": blank,
-        "전표비고(5)": blank,
+        "전표비고(1)": blank, "전표비고(2)": blank, "전표비고(3)": blank, "전표비고(4)": blank, "전표비고(5)": blank,
     })
 
-    # 색칠용 플래그
+    # 색칠 플래그
     result["__fallback"] = grouped["fb_any"].astype(bool).values
+
+    # ✅ 최종 정렬: 상품명(1) 기준 (가나다/ABC)
+    result = result.sort_values(by="상품명(1)", key=_name_sort_key, ignore_index=True)
 
     return result
 
 
 def save_result_with_style(df: pd.DataFrame, out_path: str):
-    fb_mask = df["__fallback"].fillna(False).tolist() if "__fallback" in df.columns else [False]*len(df)
-    df_to_save = df.drop(columns="__fallback") if "__fallback" in df.columns else df
+    """
+    - 결과를 다시 한 번 '상품명(1)' 기준으로 정렬 (이중 안전 장치)
+    - __fallback=True 인 셀은 '상품명(1)'을 빨간색으로 표시
+    """
+    # 안전 정렬
+    if "상품명(1)" in df.columns:
+        df_sorted = df.sort_values(by="상품명(1)", key=_name_sort_key)
+    else:
+        df_sorted = df.copy()
+
+    # __fallback 처리
+    if "__fallback" in df_sorted.columns:
+        fb_series = df_sorted["__fallback"].fillna(False)
+        df_to_save = df_sorted.drop(columns="__fallback")
+    else:
+        fb_series = pd.Series([False] * len(df_sorted), index=df_sorted.index)
+        df_to_save = df_sorted
+
+    fb_mask = fb_series.tolist()
 
     with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
         df_to_save.to_excel(writer, index=False)

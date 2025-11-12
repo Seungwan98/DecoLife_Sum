@@ -60,6 +60,7 @@ jobs:
         shell: bash
         run: |
           cp .env dist/.env
+          echo "=== dist 목록 ==="
           ls -la dist
 
       - name: Upload artifact
