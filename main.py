@@ -135,14 +135,16 @@ def build_result(main_path: str, sheet_name: Optional[str] = None) -> pd.DataFra
     final_code = df[col_code].copy()
     final_code[fallback_mask] = df[col_optid].astype(str)[fallback_mask]
 
-    # 7) 단가 계산
-    #   - 금액 절댓값 사용
-    #   - 수량 > 1 이면 금액 / 수량
-    #   - 최종 단가는 반올림 후 int
+    # 7) 단가 계산 (음수 수량도 절댓값으로 나눔)
     amount_abs = amount_raw.abs()
+
     unit_price = amount_abs.copy()
-    multi_mask = qty > 1
-    unit_price[multi_mask] = amount_abs[multi_mask] / qty[multi_mask]
+    qty_abs = qty.abs()
+
+    multi_mask = qty_abs > 1
+    unit_price[multi_mask] = amount_abs[multi_mask] / qty_abs[multi_mask]
+
+    # 반올림 후 int 로 변환
     unit_price = unit_price.round().astype(int)
 
     # 8) 중간 테이블 (부호 분리 포함)
